@@ -182,12 +182,16 @@ func (b *BitButt) newDataFile() (*dataFile, error) {
 	return &dataFile{f: f, name: fName}, nil
 }
 
-func ReadOnly(b *BitButt) {
-	b.readOnly = true
+func ReadOnly() Option {
+	return func(b *BitButt) {
+		b.readOnly = true
+	}
 }
 
-func SyncOnPut(b *BitButt) {
-	b.syncOnPut = true
+func SyncOnPut() Option {
+	return func(b *BitButt) {
+		b.syncOnPut = true
+	}
 }
 
 func SizeThreshold(size uint64) Option {
