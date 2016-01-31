@@ -12,7 +12,7 @@ import (
 
 type BitButt struct {
 	readOnly      bool
-	sizeThreshold Size
+	sizeThreshold uint64
 	syncOnPut     bool
 	dirPerm       os.FileMode
 	filePerm      os.FileMode
@@ -45,9 +45,9 @@ type Option func(*BitButt)
 type Size uint64
 
 const (
-	KiB Size = 1024
-	MiB      = 1024 * KiB
-	GiB      = 1024 * MiB
+	KiB uint64 = 1024
+	MiB        = 1024 * KiB
+	GiB        = 1024 * MiB
 
 	DefaultSize = 2 * GiB
 
@@ -104,7 +104,14 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 	dataFiles := []string{}
 	for _, file := range files {
 		if strings.HasSuffix(file, dataFileSuffix) {
-			dataFiles = append(dataFiles, file)
+			dataFiles = append(dataFiles, file[0:len(file)-len(dataFileSuffix)])
+		}
+	}
+
+	for _, f := range dataFiles {
+		// TODO: is this the right thing to do?
+		if err := b.loadDataFile(f); err != nil {
+			return nil, err
 		}
 	}
 
@@ -118,6 +125,50 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 	b.dataFiles = append(b.dataFiles, df)
 
 	return b, nil
+}
+
+func (b *BitButt) loadDataFile(file string) error {
+	dataFileName := filepath.Join(b.directory, file+dataFileSuffix)
+	hintFileName := filepath.Join(b.directory, file+hintFileSuffix)
+
+	dataf, err := os.Open(dataFileName)
+	if err != nil {
+		return err
+	}
+
+	fileID := len(b.dataFiles)
+
+	hintf, err := os.Open(hintFileName)
+	if err == nil {
+		defer hintf.Close()
+		for {
+			hint, err := readHintRecord(hintf)
+			if err != nil {
+				break
+			}
+			b.keyDir[string(hint.key)] = &keyRecord{fileID: fileID, valuePos: hint.valuePos, valueSize: hint.valueLen, ts: hint.ts}
+		}
+	} else {
+		valuePos := int64(0)
+		for {
+			r, err := readRecord(dataf)
+			if err != nil {
+				break
+			}
+
+			if r.deleted {
+				delete(b.keyDir, string(r.key))
+			} else {
+				b.keyDir[string(r.key)] = &keyRecord{fileID: fileID, valuePos: valuePos, valueSize: r.recordLen, ts: r.ts}
+			}
+
+			valuePos += int64(r.recordLen)
+		}
+	}
+
+	b.dataFiles = append(b.dataFiles, &dataFile{f: dataf, name: dataFileName, offset: 0})
+
+	return nil
 }
 
 func (b *BitButt) newDataFile() (*dataFile, error) {
@@ -139,7 +190,7 @@ func SyncOnPut(b *BitButt) {
 	b.syncOnPut = true
 }
 
-func SizeThreshold(size Size) Option {
+func SizeThreshold(size uint64) Option {
 	return func(b *BitButt) {
 		b.sizeThreshold = size
 	}
@@ -205,7 +256,9 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 	buf := (&record{key: key, value: value, ts: ts}).Bytes()
 
 	b.mtx.Lock()
-	df := b.dataFiles[len(b.dataFiles)-1]
+	fileID := len(b.dataFiles) - 1
+
+	df := b.dataFiles[fileID]
 	_, err := df.f.Write(buf)
 	if err != nil {
 		b.mtx.Unlock()
@@ -214,10 +267,10 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 
 	keyDirRecord, ok := b.keyDir[string(key)]
 	if !ok {
-		keyDirRecord = &keyRecord{fileID: len(b.dataFiles) - 1, valuePos: int64(df.offset), valueSize: uint64(len(buf)), ts: ts}
+		keyDirRecord = &keyRecord{fileID: fileID, valuePos: int64(df.offset), valueSize: uint64(len(buf)), ts: ts}
 		b.keyDir[string(key)] = keyDirRecord
 	} else {
-		keyDirRecord.fileID = len(b.dataFiles) - 1
+		keyDirRecord.fileID = fileID
 		keyDirRecord.valuePos = int64(df.offset)
 		keyDirRecord.valueSize = uint64(len(buf))
 		keyDirRecord.ts = ts
@@ -225,7 +278,17 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 
 	df.offset += keyDirRecord.valueSize
 
-	// TODO: check offset and roll around if necessary.
+	buildHintFile := false
+
+	if df.offset >= b.sizeThreshold {
+		buildHintFile = true
+
+		newDataFile, err := b.newDataFile()
+		if err != nil {
+			panic(err) // TODO: how do we handle a rollover fail?
+		}
+		b.dataFiles = append(b.dataFiles, newDataFile)
+	}
 
 	b.mtx.Unlock()
 
@@ -235,15 +298,52 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 		}
 	}
 
+	if buildHintFile {
+		go b.buildHintFile(df, fileID)
+	}
+
 	return nil
+}
+
+func (b *BitButt) buildHintFile(df *dataFile, fileID int) {
+	// TODO: implement.
 }
 
 func (b *BitButt) Delete(key []byte) error {
 	if b.closed {
 		return errClosed
 	}
-	// TODO: implement
-	return errors.New("not implemented")
+
+	data := getDeleteRecord(key, time.Now())
+
+	b.mtx.Lock()
+
+	var df *dataFile
+
+	_, ok := b.keyDir[string(key)]
+	if ok {
+		delete(b.keyDir, string(key))
+
+		fileID := len(b.dataFiles) - 1
+		df = b.dataFiles[fileID]
+		_, err := df.f.Write(data)
+		if err != nil {
+			b.mtx.Unlock()
+			return err
+		}
+
+		df.offset += uint64(len(data))
+	}
+
+	b.mtx.Unlock()
+
+	if df != nil && b.syncOnPut {
+		if err := df.f.Sync(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (b *BitButt) AllKeys() (chan []byte, error) {
