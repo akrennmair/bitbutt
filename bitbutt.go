@@ -55,8 +55,8 @@ const (
 	defaultDirPerms  = 0700
 	defaultFilePerms = 0600
 
-	dataFileSuffix = ".bitcask.data"
-	hintFileSuffix = ".bitcask.hint"
+	dataFileSuffix = ".bitbutt.data"
+	hintFileSuffix = ".bitbutt.hint"
 )
 
 var (
@@ -165,20 +165,21 @@ func (b *BitButt) loadDataFile(file string) error {
 		}
 	}
 
-	b.dataFiles = append(b.dataFiles, &dataFile{f: dataf, name: dataFileName, offset: 0})
+	b.dataFiles = append(b.dataFiles, &dataFile{f: dataf, name: file, offset: 0})
 
 	return nil
 }
 
 func (b *BitButt) newDataFile() (*dataFile, error) {
-	fName := filepath.Join(b.directory, strconv.FormatInt(time.Now().UnixNano(), 10)+dataFileSuffix)
+	file := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fName := filepath.Join(b.directory, file+dataFileSuffix)
 
 	f, err := os.OpenFile(fName, os.O_CREATE|os.O_RDWR|os.O_APPEND, b.filePerm)
 	if err != nil {
 		return nil, err
 	}
 
-	return &dataFile{f: f, name: fName}, nil
+	return &dataFile{f: f, name: file}, nil
 }
 
 func ReadOnly() Option {
@@ -303,23 +304,21 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 	}
 
 	if buildHintFile {
-		go b.buildHintFile(df, fileID)
+		// TODO: maybe run this in background?
+		b.buildHintFile(df, fileID)
 	}
 
 	return nil
 }
 
 func (b *BitButt) buildHintFile(df *dataFile, fileID int) {
-	hintFileName := df.name + hintFileSuffix
+	hintFileName := filepath.Join(b.directory, df.name+hintFileSuffix)
 	hintf, err := os.OpenFile(hintFileName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, b.filePerm)
 	if err != nil {
 		// assume the file exists already.
 		return
 	}
 	defer hintf.Close()
-
-	b.mtx.RLock()
-	defer b.mtx.RUnlock()
 
 	hints := []hintRecord{}
 
@@ -352,9 +351,9 @@ func (b *BitButt) Delete(key []byte) error {
 
 	var df *dataFile
 
-	_, ok := b.keyDir[string(key)]
+	r, ok := b.keyDir[string(key)]
 	if ok {
-		delete(b.keyDir, string(key))
+		r.valueSize = tombStone
 
 		fileID := len(b.dataFiles) - 1
 		df = b.dataFiles[fileID]
@@ -411,6 +410,8 @@ func (b *BitButt) Close() {
 	}
 
 	b.mtx.Lock()
+	b.buildHintFile(b.dataFiles[len(b.dataFiles)-1], len(b.dataFiles)-1)
+
 	for _, df := range b.dataFiles {
 		df.f.Close()
 	}
