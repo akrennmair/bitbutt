@@ -310,7 +310,35 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 }
 
 func (b *BitButt) buildHintFile(df *dataFile, fileID int) {
-	// TODO: implement.
+	hintFileName := df.name + hintFileSuffix
+	hintf, err := os.OpenFile(hintFileName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, b.filePerm)
+	if err != nil {
+		// assume the file exists already.
+		return
+	}
+	defer hintf.Close()
+
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
+
+	hints := []hintRecord{}
+
+	for key, r := range b.keyDir {
+		if r.fileID == fileID {
+			hints = append(hints, hintRecord{
+				ts:       r.ts,
+				valueLen: r.valueSize,
+				valuePos: r.valuePos,
+				key:      []byte(key),
+			})
+		}
+	}
+
+	for _, h := range hints {
+		if err := h.WriteTo(hintf); err != nil {
+			// TODO: how do we handle this error?
+		}
+	}
 }
 
 func (b *BitButt) Delete(key []byte) error {

@@ -151,3 +151,22 @@ func readHintRecord(r io.Reader) (*hintRecord, error) {
 		key:      key,
 	}, nil
 }
+
+func (r *hintRecord) WriteTo(w io.Writer) error {
+	if err := binary.Write(w, binary.BigEndian, int32(r.ts.Unix())); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint16(len(r.key))); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(r.valueLen)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint64(r.valuePos)); err != nil {
+		return err
+	}
+	if n, err := w.Write(r.key); err != nil || n < len(r.key) {
+		return err
+	}
+	return nil
+}
