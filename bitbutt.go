@@ -115,8 +115,6 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 		}
 	}
 
-	// TODO: open all dataFiles and create individual files
-
 	df, err := b.newDataFile()
 	if err != nil {
 		return nil, err
@@ -172,7 +170,7 @@ func (b *BitButt) loadDataFile(file string) error {
 }
 
 func (b *BitButt) newDataFile() (*dataFile, error) {
-	fName := filepath.Join(b.directory, strconv.FormatInt(time.Now().Unix(), 10)+dataFileSuffix)
+	fName := filepath.Join(b.directory, strconv.FormatInt(time.Now().UnixNano(), 10)+dataFileSuffix)
 
 	f, err := os.OpenFile(fName, os.O_CREATE|os.O_RDWR|os.O_APPEND, b.filePerm)
 	if err != nil {
@@ -263,6 +261,7 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 	fileID := len(b.dataFiles) - 1
 
 	df := b.dataFiles[fileID]
+
 	_, err := df.f.Write(buf)
 	if err != nil {
 		b.mtx.Unlock()
@@ -280,7 +279,7 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 		keyDirRecord.ts = ts
 	}
 
-	df.offset += keyDirRecord.valueSize
+	df.offset += uint64(len(buf))
 
 	buildHintFile := false
 
