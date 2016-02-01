@@ -1,6 +1,7 @@
 package bitbutt
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -231,7 +232,7 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	r, err := decodeRecord(data)
+	r, err := readRecord(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
