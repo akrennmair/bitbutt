@@ -3,6 +3,7 @@ package bitbutt
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,12 +66,13 @@ const (
 )
 
 var (
-	errKeyTooLong   = errors.New("key too long")
-	errValueTooLong = errors.New("value too long")
-	errReadOnly     = errors.New("bitbutt is read-only")
-	errNotDirectory = errors.New("bitbutt is not a directory")
-	errNotFound     = errors.New("not found")
-	errClosed       = errors.New("bitbutt is closed")
+	errKeyTooLong      = errors.New("key too long")
+	errValueTooLong    = errors.New("value too long")
+	errReadOnly        = errors.New("bitbutt is read-only")
+	errNotDirectory    = errors.New("bitbutt is not a directory")
+	errNotFound        = errors.New("not found")
+	errClosed          = errors.New("bitbutt is closed")
+	errInvalidDataFile = errors.New("invalid data file name")
 )
 
 // Open opens a bitbutt key-value store, found in directory. If directory
@@ -519,19 +521,32 @@ func (b *BitButt) Merge() error {
 	firstUnmergedName := dataFilesToMerge[len(dataFilesToMerge)-1].name
 	nameNum, err := strconv.ParseUint(firstUnmergedName, 10, 64)
 	if err != nil {
-		panic(err) // TODO: how do we handle that error?
+		return errInvalidDataFile
 	}
 	newName := strconv.FormatUint(nameNum+1, 10)
 	newDataFile.name = newName
 
-	newf, err := os.OpenFile(filepath.Join(b.directory, newName+dataFileSuffix), os.O_CREATE|os.O_TRUNC|os.O_RDWR|os.O_APPEND, b.filePerm)
+	mergedDataFileName := filepath.Join(b.directory, newName+dataFileSuffix)
+	mergedHintFileName := filepath.Join(b.directory, newName+hintFileSuffix)
+
+	newf, err := os.OpenFile(mergedDataFileName, os.O_CREATE|os.O_TRUNC|os.O_RDWR|os.O_APPEND, b.filePerm)
 	if err != nil {
-		panic(err) // TODO: how do we handle that error?
+		return err
 	}
 
-	newHintFile, err := os.OpenFile(filepath.Join(b.directory, newName+hintFileSuffix), os.O_CREATE|os.O_RDWR|os.O_APPEND, b.filePerm)
+	newHintFile, err := os.OpenFile(mergedHintFileName, os.O_CREATE|os.O_RDWR|os.O_APPEND, b.filePerm)
 	if err != nil {
-		panic(err) // TODO: how do we handle that error?
+		// clean up newf
+		newf.Close()
+		os.Remove(mergedDataFileName)
+		return err
+	}
+
+	rollbackOnError := func() {
+		newf.Close()
+		newHintFile.Close()
+		os.Remove(mergedDataFileName)
+		os.Remove(mergedHintFileName)
 	}
 
 	newDataFile.f = newf
@@ -549,24 +564,21 @@ func (b *BitButt) Merge() error {
 
 		data := make([]byte, keyDirRecord.recordSize)
 		if _, err := f.ReadAt(data, keyDirRecord.recordPos); err != nil {
-			// TODO: how do we signal an error?
-			//log.Printf("ReadAt failed: %v", err)
-			continue
+			rollbackOnError()
+			return fmt.Errorf("ReadAt failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos)
 		}
 
 		r, err := readRecord(bytes.NewReader(data))
 		if err != nil {
-			//log.Printf("readRecord failed: %v", err)
-			// TODO: how do we signal an error?
-			continue
+			rollbackOnError()
+			return fmt.Errorf("Decoding record failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos)
 		}
 
 		recordData := r.Bytes()
 		_, err = newDataFile.f.Write(recordData)
 		if err != nil {
-			//log.Printf("Write failed: %v", err)
-			// TODO: how do we signal an error?
-			continue
+			rollbackOnError()
+			return fmt.Errorf("Write to merged data file %s failed: %v", mergedDataFileName, err)
 		}
 
 		keyDirRecord.recordPos = recordPos
@@ -576,9 +588,8 @@ func (b *BitButt) Merge() error {
 
 		hr := hintRecord{ts: keyDirRecord.ts, recordSize: keyDirRecord.recordSize, recordPos: keyDirRecord.recordPos, key: []byte(key)}
 		if _, err := hr.WriteTo(newHintFile); err != nil {
-			//log.Printf("hr.WriteTo failed: %v", err)
-			// TODO: how do we signal an error?
-			continue
+			rollbackOnError()
+			return fmt.Errorf("Write to merged hint file %s failed: %v", mergedHintFileName, err)
 		}
 	}
 	newHintFile.Close()
