@@ -1,5 +1,7 @@
 # bitbutt - a Go implementation of bitcask
 
+[![GoDoc](https://godoc.org/github.com/akrennmair/bitbutt?status.svg)](https://godoc.org/github.com/akrennmair/bitbutt)
+
 bitbutt is a Go implementation of bitcask, a log-structured hash table for fast 
 key/value data.
 

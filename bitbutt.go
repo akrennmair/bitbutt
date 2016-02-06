@@ -625,7 +625,7 @@ func (b *BitButt) Merge() error {
 	return nil
 }
 
-// Sync calls fsync(2) on all open data files.
+// Sync calls fsync(2) on the latest data file.
 func (b *BitButt) Sync() error {
 	if b.closed {
 		return errClosed

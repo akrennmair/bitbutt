@@ -82,6 +82,39 @@ func TestMerge(t *testing.T) {
 	os.RemoveAll("./merge.db")
 }
 
+func TestAllKeys(t *testing.T) {
+	os.RemoveAll("./allkeys.db")
+	bb, err := Open("./allkeys.db")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		bb.Put([]byte{byte(i)}, []byte{})
+	}
+
+	bb.Sync()
+
+	gotKeys := 0
+	ch, err := bb.AllKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range ch {
+		if len(k) != 1 {
+			t.Fatalf("weird key: len(k) = %d", len(k))
+		}
+		gotKeys++
+	}
+	if gotKeys != 100 {
+		t.Fatalf("expected 100 keys, got %d.", gotKeys)
+	}
+
+	bb.Close()
+
+	os.RemoveAll("./allkeys.db")
+}
+
 func TestOpenWriteClose(t *testing.T) {
 	os.RemoveAll("./test.db")
 	bb, err := Open("./test.db")
