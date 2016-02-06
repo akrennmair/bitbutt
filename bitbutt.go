@@ -120,7 +120,6 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 	}
 
 	for _, f := range dataFiles {
-		// TODO: is this the right thing to do?
 		if err := b.loadDataFile(f); err != nil {
 			return nil, err
 		}
@@ -485,9 +484,7 @@ func (b *BitButt) Merge() error {
 		} else {
 			dataf, err := os.Open(dataFileName)
 			if err != nil {
-				//log.Printf("os.Open %s failed: %v", dataFileName, err)
-				// TODO: should we signal error?
-				continue
+				return err
 			}
 
 			recordPos := int64(0)
@@ -606,7 +603,7 @@ func (b *BitButt) Merge() error {
 		if kr.fileID < mergedDataFileCount {
 			if mergedRecord, ok := mergedHintFile[key]; ok {
 				if mergedRecord.recordSize == tombStone {
-					delete(b.keyDir, key) // TODO: is this legal?
+					delete(b.keyDir, key)
 				} else {
 					//log.Printf("Merge %q: fileID:%d valuePos:%d valueSize:%d", key, kr.fileID, kr.valuePos, kr.valueSize)
 					kr.fileID = mergedRecord.fileID
@@ -616,7 +613,7 @@ func (b *BitButt) Merge() error {
 				}
 			} else {
 				//log.Printf("couldn't find record for %s in existing keyDir", key)
-				delete(b.keyDir, key) // TODO: is this legal?
+				delete(b.keyDir, key)
 			}
 		} else {
 			kr.fileID -= mergedDataFileCount - 1
