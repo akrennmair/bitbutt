@@ -37,10 +37,10 @@ type dataFile struct {
 }
 
 type keyRecord struct {
-	fileID    int
-	valuePos  int64
-	valueSize uint64
-	ts        time.Time
+	fileID     int
+	recordPos  int64
+	recordSize uint64
+	ts         time.Time
 }
 
 // Option is a data type to set options when calling Open.
@@ -153,10 +153,10 @@ func (b *BitButt) loadDataFile(file string) error {
 			if err != nil {
 				break
 			}
-			b.keyDir[string(hint.key)] = &keyRecord{fileID: fileID, valuePos: hint.valuePos, valueSize: hint.valueLen, ts: hint.ts}
+			b.keyDir[string(hint.key)] = &keyRecord{fileID: fileID, recordPos: hint.recordPos, recordSize: hint.recordSize, ts: hint.ts}
 		}
 	} else {
-		valuePos := int64(0)
+		recordPos := int64(0)
 		for {
 			r, err := readRecord(dataf)
 			if err != nil {
@@ -166,10 +166,10 @@ func (b *BitButt) loadDataFile(file string) error {
 			if r.deleted {
 				delete(b.keyDir, string(r.key))
 			} else {
-				b.keyDir[string(r.key)] = &keyRecord{fileID: fileID, valuePos: valuePos, valueSize: r.recordLen, ts: r.ts}
+				b.keyDir[string(r.key)] = &keyRecord{fileID: fileID, recordPos: recordPos, recordSize: r.recordLen, ts: r.ts}
 			}
 
-			valuePos += int64(r.recordLen)
+			recordPos += int64(r.recordLen)
 		}
 	}
 
@@ -236,7 +236,7 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 	defer b.mtx.RUnlock()
 
 	keyDirRecord := b.keyDir[string(key)]
-	if keyDirRecord == nil || keyDirRecord.valueSize == tombStone {
+	if keyDirRecord == nil || keyDirRecord.recordSize == tombStone {
 		return nil, errNotFound
 	}
 
@@ -244,8 +244,8 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 	f := df.f
 	//log.Printf("Get %q: fileID:%d valuePos:%d valueSize:%d", string(key), keyDirRecord.fileID, keyDirRecord.valuePos, keyDirRecord.valueSize)
 
-	data := make([]byte, keyDirRecord.valueSize)
-	if _, err := f.ReadAt(data, keyDirRecord.valuePos); err != nil {
+	data := make([]byte, keyDirRecord.recordSize)
+	if _, err := f.ReadAt(data, keyDirRecord.recordPos); err != nil {
 		return nil, err
 	}
 
@@ -290,12 +290,12 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 
 	keyDirRecord, ok := b.keyDir[string(key)]
 	if !ok {
-		keyDirRecord = &keyRecord{fileID: fileID, valuePos: int64(df.offset), valueSize: uint64(len(buf)), ts: ts}
+		keyDirRecord = &keyRecord{fileID: fileID, recordPos: int64(df.offset), recordSize: uint64(len(buf)), ts: ts}
 		b.keyDir[string(key)] = keyDirRecord
 	} else {
 		keyDirRecord.fileID = fileID
-		keyDirRecord.valuePos = int64(df.offset)
-		keyDirRecord.valueSize = uint64(len(buf))
+		keyDirRecord.recordPos = int64(df.offset)
+		keyDirRecord.recordSize = uint64(len(buf))
 		keyDirRecord.ts = ts
 	}
 
@@ -322,8 +322,11 @@ func (b *BitButt) Put(key []byte, value []byte) error {
 	}
 
 	if buildHintFile {
-		// TODO: maybe run this in background?
-		b.buildHintFile(df, fileID)
+		go func() {
+			b.mtx.RLock()
+			b.buildHintFile(df, fileID)
+			b.mtx.RUnlock()
+		}()
 	}
 
 	return nil
@@ -343,10 +346,10 @@ func (b *BitButt) buildHintFile(df *dataFile, fileID int) {
 	for key, r := range b.keyDir {
 		if r.fileID == fileID {
 			hints = append(hints, hintRecord{
-				ts:       r.ts,
-				valueLen: r.valueSize,
-				valuePos: r.valuePos,
-				key:      []byte(key),
+				ts:         r.ts,
+				recordSize: r.recordSize,
+				recordPos:  r.recordPos,
+				key:        []byte(key),
 			})
 		}
 	}
@@ -374,7 +377,7 @@ func (b *BitButt) Delete(key []byte) error {
 
 	r, ok := b.keyDir[string(key)]
 	if ok {
-		r.valueSize = tombStone
+		r.recordSize = tombStone
 
 		fileID := len(b.dataFiles) - 1
 		df = b.dataFiles[fileID]
@@ -413,7 +416,7 @@ func (b *BitButt) AllKeys() (<-chan []byte, error) {
 		defer b.mtx.RUnlock()
 
 		for key, record := range b.keyDir {
-			if record.valueSize == tombStone {
+			if record.recordSize == tombStone {
 				continue
 			}
 			ch <- []byte(key)
@@ -467,12 +470,12 @@ func (b *BitButt) Merge() error {
 				if ok {
 					if hint.ts.After(r.ts) {
 						r.fileID = fileID
-						r.valuePos = hint.valuePos
-						r.valueSize = hint.valueLen
+						r.recordPos = hint.recordPos
+						r.recordSize = hint.recordSize
 						r.ts = hint.ts
 					}
 				} else {
-					r = &keyRecord{fileID: fileID, valuePos: hint.valuePos, valueSize: hint.valueLen, ts: hint.ts}
+					r = &keyRecord{fileID: fileID, recordPos: hint.recordPos, recordSize: hint.recordSize, ts: hint.ts}
 					mergedHintFile[string(hint.key)] = r
 				}
 			}
@@ -485,7 +488,7 @@ func (b *BitButt) Merge() error {
 				continue
 			}
 
-			valuePos := int64(0)
+			recordPos := int64(0)
 			for {
 				r, err := readRecord(dataf)
 				if err != nil {
@@ -496,16 +499,16 @@ func (b *BitButt) Merge() error {
 				if ok {
 					if r.ts.After(kr.ts) {
 						kr.fileID = fileID
-						kr.valuePos = valuePos
-						kr.valueSize = r.recordLen
+						kr.recordPos = recordPos
+						kr.recordSize = r.recordLen
 						kr.ts = r.ts
 					}
 				} else {
-					kr = &keyRecord{fileID: fileID, valuePos: valuePos, valueSize: r.recordLen, ts: r.ts}
+					kr = &keyRecord{fileID: fileID, recordPos: recordPos, recordSize: r.recordLen, ts: r.ts}
 					mergedHintFile[string(r.key)] = kr
 				}
 
-				valuePos += int64(r.recordLen)
+				recordPos += int64(r.recordLen)
 			}
 			dataf.Close()
 		}
@@ -533,19 +536,19 @@ func (b *BitButt) Merge() error {
 
 	newDataFile.f = newf
 
-	valuePos := int64(0)
+	recordPos := int64(0)
 
 	for key, keyDirRecord := range mergedHintFile {
 		// ignore all deleted records.
-		if keyDirRecord.valueSize == tombStone {
+		if keyDirRecord.recordSize == tombStone {
 			continue
 		}
 
 		df := dataFilesToMerge[keyDirRecord.fileID]
 		f := df.f
 
-		data := make([]byte, keyDirRecord.valueSize)
-		if _, err := f.ReadAt(data, keyDirRecord.valuePos); err != nil {
+		data := make([]byte, keyDirRecord.recordSize)
+		if _, err := f.ReadAt(data, keyDirRecord.recordPos); err != nil {
 			// TODO: how do we signal an error?
 			//log.Printf("ReadAt failed: %v", err)
 			continue
@@ -566,12 +569,12 @@ func (b *BitButt) Merge() error {
 			continue
 		}
 
-		keyDirRecord.valuePos = valuePos
+		keyDirRecord.recordPos = recordPos
 		keyDirRecord.fileID = 0
 
-		valuePos += int64(len(recordData))
+		recordPos += int64(len(recordData))
 
-		hr := hintRecord{ts: keyDirRecord.ts, valueLen: keyDirRecord.valueSize, valuePos: keyDirRecord.valuePos, key: []byte(key)}
+		hr := hintRecord{ts: keyDirRecord.ts, recordSize: keyDirRecord.recordSize, recordPos: keyDirRecord.recordPos, key: []byte(key)}
 		if _, err := hr.WriteTo(newHintFile); err != nil {
 			//log.Printf("hr.WriteTo failed: %v", err)
 			// TODO: how do we signal an error?
@@ -591,13 +594,13 @@ func (b *BitButt) Merge() error {
 	for key, kr := range b.keyDir {
 		if kr.fileID < mergedDataFileCount {
 			if mergedRecord, ok := mergedHintFile[key]; ok {
-				if mergedRecord.valueSize == tombStone {
+				if mergedRecord.recordSize == tombStone {
 					delete(b.keyDir, key) // TODO: is this legal?
 				} else {
 					//log.Printf("Merge %q: fileID:%d valuePos:%d valueSize:%d", key, kr.fileID, kr.valuePos, kr.valueSize)
 					kr.fileID = mergedRecord.fileID
-					kr.valuePos = mergedRecord.valuePos
-					kr.valueSize = mergedRecord.valueSize
+					kr.recordPos = mergedRecord.recordPos
+					kr.recordSize = mergedRecord.recordSize
 					kr.ts = mergedRecord.ts
 				}
 			} else {
@@ -643,7 +646,6 @@ func (b *BitButt) Close() {
 
 	b.mtx.Lock()
 	b.buildHintFile(b.dataFiles[len(b.dataFiles)-1], len(b.dataFiles)-1)
-
 	for _, df := range b.dataFiles {
 		df.f.Close()
 	}

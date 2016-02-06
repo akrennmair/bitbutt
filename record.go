@@ -27,10 +27,10 @@ type record struct {
 }
 
 type hintRecord struct {
-	ts       time.Time
-	valueLen uint64
-	valuePos int64
-	key      []byte
+	ts         time.Time
+	recordSize uint64
+	recordPos  int64
+	key        []byte
 }
 
 func (r *record) Bytes() []byte {
@@ -68,7 +68,7 @@ func readRecord(r io.Reader) (*record, error) {
 		crc        uint32
 		ts         int32
 		keyLen     uint16
-		valueLen   uint32
+		recordSize uint32
 		key, value []byte
 		deleted    bool
 	)
@@ -83,17 +83,17 @@ func readRecord(r io.Reader) (*record, error) {
 	_ = crc // TODO: verify CRC.
 	ts = int32(binary.BigEndian.Uint32(buf[4:8]))
 	keyLen = binary.BigEndian.Uint16(buf[8:10])
-	valueLen = binary.BigEndian.Uint32(buf[10:14])
+	recordSize = binary.BigEndian.Uint32(buf[10:14])
 
 	key = make([]byte, int(keyLen))
 	if _, err := io.ReadFull(r, key); err != nil {
 		return nil, err
 	}
 
-	if valueLen == tombStone {
+	if recordSize == tombStone {
 		deleted = true
 	} else {
-		value = make([]byte, int(valueLen))
+		value = make([]byte, int(recordSize))
 		if _, err := io.ReadFull(r, value); err != nil {
 			return nil, err
 		}
@@ -110,10 +110,10 @@ func readRecord(r io.Reader) (*record, error) {
 
 func readHintRecord(r io.Reader) (*hintRecord, error) {
 	var (
-		ts       int32
-		keyLen   uint16
-		valueLen uint32
-		valuePos uint64
+		ts         int32
+		keyLen     uint16
+		recordSize uint32
+		recordPos  uint64
 	)
 
 	var buf [18]byte
@@ -123,8 +123,8 @@ func readHintRecord(r io.Reader) (*hintRecord, error) {
 
 	ts = int32(binary.BigEndian.Uint32(buf[0:4]))
 	keyLen = binary.BigEndian.Uint16(buf[4:6])
-	valueLen = binary.BigEndian.Uint32(buf[6:10])
-	valuePos = binary.BigEndian.Uint64(buf[10:18])
+	recordSize = binary.BigEndian.Uint32(buf[6:10])
+	recordPos = binary.BigEndian.Uint64(buf[10:18])
 
 	key := make([]byte, keyLen)
 	if _, err := io.ReadFull(r, key); err != nil {
@@ -132,10 +132,10 @@ func readHintRecord(r io.Reader) (*hintRecord, error) {
 	}
 
 	return &hintRecord{
-		ts:       time.Unix(int64(ts), 0),
-		valueLen: uint64(valueLen),
-		valuePos: int64(valuePos),
-		key:      key,
+		ts:         time.Unix(int64(ts), 0),
+		recordSize: uint64(recordSize),
+		recordPos:  int64(recordPos),
+		key:        key,
 	}, nil
 }
 
@@ -144,8 +144,8 @@ func (r *hintRecord) WriteTo(w io.Writer) (int64, error) {
 	buf := make([]byte, recordSize)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(r.ts.Unix()))
 	binary.BigEndian.PutUint16(buf[4:6], uint16(len(r.key)))
-	binary.BigEndian.PutUint32(buf[6:10], uint32(r.valueLen))
-	binary.BigEndian.PutUint64(buf[10:18], uint64(r.valuePos))
+	binary.BigEndian.PutUint32(buf[6:10], uint32(r.recordSize))
+	binary.BigEndian.PutUint64(buf[10:18], uint64(r.recordPos))
 	copy(buf[18:], r.key)
 
 	n, err := w.Write(buf)

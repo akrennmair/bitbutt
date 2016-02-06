@@ -20,6 +20,9 @@ Installation is as simple as
 As with all Go packages, you can find the documentation on 
 [godoc.org](http://godoc.org/github.com/akrennmair/bitbutt).
 
+For the concepts of bitcask, please refer to the [original 
+paper](http://basho.com/wp-content/uploads/2015/05/bitcask-intro.pdf) by Basho.
+
 ## License
 
 See the file LICENSE for license information.
