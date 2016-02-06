@@ -1,8 +1,8 @@
 package bitbutt
 
 import (
-	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"io"
 	"time"
@@ -15,7 +15,7 @@ const (
 )
 
 var (
-	crc32Table = crc32.MakeTable(crc32.IEEE)
+	errShortWrite = errors.New("short write")
 )
 
 type record struct {
@@ -34,43 +34,33 @@ type hintRecord struct {
 }
 
 func (r *record) Bytes() []byte {
-	var buf bytes.Buffer
+	buf := make([]byte, 4+4+2+4+len(r.key)+len(r.value))
 
-	binary.Write(&buf, binary.BigEndian, int32(r.ts.Unix()))
-	binary.Write(&buf, binary.BigEndian, uint16(len(r.key)))
-	binary.Write(&buf, binary.BigEndian, uint32(len(r.value)))
-	buf.Write(r.key)
-	buf.Write(r.value)
+	binary.BigEndian.PutUint32(buf[4:8], uint32(r.ts.Unix()))
+	binary.BigEndian.PutUint16(buf[8:10], uint16(len(r.key)))
+	binary.BigEndian.PutUint32(buf[10:14], uint32(len(r.value)))
+	copy(buf[14:14+len(r.key)], r.key)
+	copy(buf[14+len(r.key):], r.value)
 
-	data := buf.Bytes()
+	checksum := crc32.ChecksumIEEE(buf[4:])
 
-	checksum := crc32.Checksum(data, crc32Table)
+	binary.BigEndian.PutUint32(buf[0:4], checksum)
 
-	var checksumBuf bytes.Buffer
-	binary.Write(&checksumBuf, binary.BigEndian, checksum)
-
-	result := append(checksumBuf.Bytes(), data...)
-
-	return result
+	return buf
 }
 
 func getDeleteRecord(key []byte, ts time.Time) []byte {
-	var buf bytes.Buffer
+	buf := make([]byte, 4+4+2+4+len(key))
 
-	binary.Write(&buf, binary.BigEndian, int32(ts.Unix()))
-	binary.Write(&buf, binary.BigEndian, uint16(len(key)))
-	binary.Write(&buf, binary.BigEndian, uint32(tombStone))
-	buf.Write(key)
+	binary.BigEndian.PutUint32(buf[4:8], uint32(ts.Unix()))
+	binary.BigEndian.PutUint16(buf[8:10], uint16(len(key)))
+	binary.BigEndian.PutUint32(buf[10:14], uint32(tombStone))
+	copy(buf[14:], key)
 
-	data := buf.Bytes()
+	checksum := crc32.ChecksumIEEE(buf[4:])
+	binary.BigEndian.PutUint32(buf[0:4], checksum)
 
-	checksum := crc32.Checksum(data, crc32Table)
-	var checksumBuf bytes.Buffer
-	binary.Write(&checksumBuf, binary.BigEndian, checksum)
-
-	result := append(checksumBuf.Bytes(), data...)
-
-	return result
+	return buf
 }
 
 func readRecord(r io.Reader) (*record, error) {
@@ -83,21 +73,20 @@ func readRecord(r io.Reader) (*record, error) {
 		deleted    bool
 	)
 
-	if err := binary.Read(r, binary.BigEndian, &crc); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.BigEndian, &ts); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.BigEndian, &valueLen); err != nil {
+	var buf [14]byte
+
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		return nil, err
 	}
 
+	crc = binary.BigEndian.Uint32(buf[0:4])
+	_ = crc // TODO: verify CRC.
+	ts = int32(binary.BigEndian.Uint32(buf[4:8]))
+	keyLen = binary.BigEndian.Uint16(buf[8:10])
+	valueLen = binary.BigEndian.Uint32(buf[10:14])
+
 	key = make([]byte, int(keyLen))
-	if n, err := r.Read(key); err != nil || n < len(key) {
+	if _, err := io.ReadFull(r, key); err != nil {
 		return nil, err
 	}
 
@@ -105,7 +94,7 @@ func readRecord(r io.Reader) (*record, error) {
 		deleted = true
 	} else {
 		value = make([]byte, int(valueLen))
-		if n, err := r.Read(value); err != nil || n < len(value) {
+		if _, err := io.ReadFull(r, value); err != nil {
 			return nil, err
 		}
 	}
@@ -127,20 +116,18 @@ func readHintRecord(r io.Reader) (*hintRecord, error) {
 		valuePos uint64
 	)
 
-	if err := binary.Read(r, binary.BigEndian, &ts); err != nil {
+	var buf [18]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		return nil, err
 	}
-	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.BigEndian, &valueLen); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.BigEndian, &valuePos); err != nil {
-		return nil, err
-	}
-	key := make([]byte, int(keyLen))
-	if n, err := r.Read(key); err != nil || n != len(key) {
+
+	ts = int32(binary.BigEndian.Uint32(buf[0:4]))
+	keyLen = binary.BigEndian.Uint16(buf[4:6])
+	valueLen = binary.BigEndian.Uint32(buf[6:10])
+	valuePos = binary.BigEndian.Uint64(buf[10:18])
+
+	key := make([]byte, keyLen)
+	if _, err := io.ReadFull(r, key); err != nil {
 		return nil, err
 	}
 
@@ -152,21 +139,21 @@ func readHintRecord(r io.Reader) (*hintRecord, error) {
 	}, nil
 }
 
-func (r *hintRecord) WriteTo(w io.Writer) error {
-	if err := binary.Write(w, binary.BigEndian, int32(r.ts.Unix())); err != nil {
-		return err
+func (r *hintRecord) WriteTo(w io.Writer) (int64, error) {
+	recordSize := 4 + 2 + 4 + 8 + len(r.key)
+	buf := make([]byte, recordSize)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(r.ts.Unix()))
+	binary.BigEndian.PutUint16(buf[4:6], uint16(len(r.key)))
+	binary.BigEndian.PutUint32(buf[6:10], uint32(r.valueLen))
+	binary.BigEndian.PutUint64(buf[10:18], uint64(r.valuePos))
+	copy(buf[18:], r.key)
+
+	n, err := w.Write(buf)
+	if err != nil {
+		return 0, err
 	}
-	if err := binary.Write(w, binary.BigEndian, uint16(len(r.key))); err != nil {
-		return err
+	if n != recordSize {
+		return int64(n), errShortWrite
 	}
-	if err := binary.Write(w, binary.BigEndian, uint32(r.valueLen)); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.BigEndian, uint64(r.valuePos)); err != nil {
-		return err
-	}
-	if n, err := w.Write(r.key); err != nil || n < len(r.key) {
-		return err
-	}
-	return nil
+	return int64(len(buf)), nil
 }

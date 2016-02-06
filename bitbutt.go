@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// BitButt implements a key-value store based on Basho's bitcask log-structured
+// hash-table.
 type BitButt struct {
 	readOnly      bool
 	sizeThreshold uint64
@@ -41,15 +43,18 @@ type keyRecord struct {
 	ts        time.Time
 }
 
+// Option is a data type to set options when calling Open.
 type Option func(*BitButt)
 
-type Size uint64
-
 const (
+	// KiB is to be used with ThresholdSize to specify kibibytes (1024 bytes).
 	KiB uint64 = 1024
-	MiB        = 1024 * KiB
-	GiB        = 1024 * MiB
+	// MiB is to be used with ThresholdSize to specify mibibytes (1024 kibibytes).
+	MiB = 1024 * KiB
+	// GiB is to be used with ThresholdSize to specify gibibytes (1024 mibibytes).
+	GiB = 1024 * MiB
 
+	// DefaultSize is the default threshold size.
 	DefaultSize = 2 * GiB
 
 	defaultDirPerms  = 0700
@@ -68,6 +73,9 @@ var (
 	errClosed       = errors.New("bitbutt is closed")
 )
 
+// Open opens a bitbutt key-value store, found in directory. If directory
+// doesn't exist yet, it is created. It returns a BitButt object, or an error
+// if opening and loading the key-value store failed.
 func Open(directory string, opts ...Option) (*BitButt, error) {
 	b := &BitButt{
 		sizeThreshold: DefaultSize,
@@ -182,36 +190,43 @@ func (b *BitButt) newDataFile() (*dataFile, error) {
 	return &dataFile{f: f, name: file}, nil
 }
 
+// ReadOnly sets a bitbutt store to be opened as read-only.
 func ReadOnly() Option {
 	return func(b *BitButt) {
 		b.readOnly = true
 	}
 }
 
+// SyncOnPut makes a bitbutt store call fsync(2) on every Put call.
 func SyncOnPut() Option {
 	return func(b *BitButt) {
 		b.syncOnPut = true
 	}
 }
 
+// SizeThreshold sets the size threshold when a bitbutt store shall create a new data file.
 func SizeThreshold(size uint64) Option {
 	return func(b *BitButt) {
 		b.sizeThreshold = size
 	}
 }
 
+// DirPerms overrides the default permissions to create directories.
 func DirPerms(perm os.FileMode) Option {
 	return func(b *BitButt) {
 		b.dirPerm = perm
 	}
 }
 
+// FilePerms overrides the default permissions to create files.
 func FilePerms(perm os.FileMode) Option {
 	return func(b *BitButt) {
 		b.filePerm = perm
 	}
 }
 
+// Get returns the stored value for the specified key, or an error if the key-value pair
+// doesn't exist or there was another error when retrieving the value.
 func (b *BitButt) Get(key []byte) ([]byte, error) {
 	if b.closed {
 		return nil, errClosed
@@ -221,12 +236,13 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 	defer b.mtx.RUnlock()
 
 	keyDirRecord := b.keyDir[string(key)]
-	if keyDirRecord == nil {
+	if keyDirRecord == nil || keyDirRecord.valueSize == tombStone {
 		return nil, errNotFound
 	}
 
 	df := b.dataFiles[keyDirRecord.fileID]
 	f := df.f
+	//log.Printf("Get %q: fileID:%d valuePos:%d valueSize:%d", string(key), keyDirRecord.fileID, keyDirRecord.valuePos, keyDirRecord.valueSize)
 
 	data := make([]byte, keyDirRecord.valueSize)
 	if _, err := f.ReadAt(data, keyDirRecord.valuePos); err != nil {
@@ -241,6 +257,8 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 	return r.value, nil
 }
 
+// Put stores the specified key-value pair in the bitbutt data store. It
+// returns an error if the Put call failed.
 func (b *BitButt) Put(key []byte, value []byte) error {
 	if b.closed {
 		return errClosed
@@ -334,12 +352,15 @@ func (b *BitButt) buildHintFile(df *dataFile, fileID int) {
 	}
 
 	for _, h := range hints {
-		if err := h.WriteTo(hintf); err != nil {
+		if _, err := h.WriteTo(hintf); err != nil {
+			//log.Printf("WriteTo failed: %v", err)
 			// TODO: how do we handle this error?
 		}
 	}
 }
 
+// Delete deletes the record identified by key. If the delete operation fails,
+// it returns an error.
 func (b *BitButt) Delete(key []byte) error {
 	if b.closed {
 		return errClosed
@@ -377,22 +398,231 @@ func (b *BitButt) Delete(key []byte) error {
 	return nil
 }
 
-func (b *BitButt) AllKeys() (chan []byte, error) {
+// AllKeys returns a channel from which all keys within the bitbutt can be
+// received. It returns an error if there was a problem retrieving the keys.
+func (b *BitButt) AllKeys() (<-chan []byte, error) {
 	if b.closed {
 		return nil, errClosed
 	}
-	// TODO: implement
-	return nil, errors.New("not implemented")
+
+	ch := make(chan []byte, 1)
+
+	go func() {
+		defer close(ch)
+		b.mtx.RLock()
+		defer b.mtx.RUnlock()
+
+		for key, record := range b.keyDir {
+			if record.valueSize == tombStone {
+				continue
+			}
+			ch <- []byte(key)
+		}
+	}()
+
+	return ch, nil
 }
 
+// Merge merges existing data files if more than one (in addition to the
+// currently active file) exist.
 func (b *BitButt) Merge() error {
 	if b.closed {
 		return errClosed
 	}
-	// TODO: implement
-	return errors.New("not implemented")
+	if b.readOnly {
+		return errReadOnly
+	}
+
+	b.mtx.RLock()
+
+	// first, we determine the data files we want to merge. Since every data file
+	// but the last one are only being read, we choose all but the last one.
+	dataFilesToMerge := b.dataFiles[:len(b.dataFiles)-1]
+
+	b.mtx.RUnlock()
+
+	// we need at least two data files to merge.
+	if len(dataFilesToMerge) < 2 {
+		// not enough files to merge
+		return nil
+	}
+
+	mergedHintFile := map[string]*keyRecord{}
+
+	for fileID, df := range dataFilesToMerge {
+		dataFileName := filepath.Join(b.directory, df.name+dataFileSuffix)
+		hintFileName := filepath.Join(b.directory, df.name+hintFileSuffix)
+
+		// we first check whether a hint file exists. If it does, we try to
+		// read it, and fill our merged hint file.
+		hintf, err := os.Open(hintFileName)
+		if err == nil {
+			for {
+				hint, err := readHintRecord(hintf)
+				if err != nil {
+					break
+				}
+
+				r, ok := mergedHintFile[string(hint.key)]
+				if ok {
+					if hint.ts.After(r.ts) {
+						r.fileID = fileID
+						r.valuePos = hint.valuePos
+						r.valueSize = hint.valueLen
+						r.ts = hint.ts
+					}
+				} else {
+					r = &keyRecord{fileID: fileID, valuePos: hint.valuePos, valueSize: hint.valueLen, ts: hint.ts}
+					mergedHintFile[string(hint.key)] = r
+				}
+			}
+			hintf.Close()
+		} else {
+			dataf, err := os.Open(dataFileName)
+			if err != nil {
+				//log.Printf("os.Open %s failed: %v", dataFileName, err)
+				// TODO: should we signal error?
+				continue
+			}
+
+			valuePos := int64(0)
+			for {
+				r, err := readRecord(dataf)
+				if err != nil {
+					break
+				}
+
+				kr, ok := mergedHintFile[string(r.key)]
+				if ok {
+					if r.ts.After(kr.ts) {
+						kr.fileID = fileID
+						kr.valuePos = valuePos
+						kr.valueSize = r.recordLen
+						kr.ts = r.ts
+					}
+				} else {
+					kr = &keyRecord{fileID: fileID, valuePos: valuePos, valueSize: r.recordLen, ts: r.ts}
+					mergedHintFile[string(r.key)] = kr
+				}
+
+				valuePos += int64(r.recordLen)
+			}
+			dataf.Close()
+		}
+	}
+
+	newDataFile := &dataFile{}
+
+	firstUnmergedName := dataFilesToMerge[len(dataFilesToMerge)-1].name
+	nameNum, err := strconv.ParseUint(firstUnmergedName, 10, 64)
+	if err != nil {
+		panic(err) // TODO: how do we handle that error?
+	}
+	newName := strconv.FormatUint(nameNum+1, 10)
+	newDataFile.name = newName
+
+	newf, err := os.OpenFile(filepath.Join(b.directory, newName+dataFileSuffix), os.O_CREATE|os.O_TRUNC|os.O_RDWR|os.O_APPEND, b.filePerm)
+	if err != nil {
+		panic(err) // TODO: how do we handle that error?
+	}
+
+	newHintFile, err := os.OpenFile(filepath.Join(b.directory, newName+hintFileSuffix), os.O_CREATE|os.O_RDWR|os.O_APPEND, b.filePerm)
+	if err != nil {
+		panic(err) // TODO: how do we handle that error?
+	}
+
+	newDataFile.f = newf
+
+	valuePos := int64(0)
+
+	for key, keyDirRecord := range mergedHintFile {
+		// ignore all deleted records.
+		if keyDirRecord.valueSize == tombStone {
+			continue
+		}
+
+		df := dataFilesToMerge[keyDirRecord.fileID]
+		f := df.f
+
+		data := make([]byte, keyDirRecord.valueSize)
+		if _, err := f.ReadAt(data, keyDirRecord.valuePos); err != nil {
+			// TODO: how do we signal an error?
+			//log.Printf("ReadAt failed: %v", err)
+			continue
+		}
+
+		r, err := readRecord(bytes.NewReader(data))
+		if err != nil {
+			//log.Printf("readRecord failed: %v", err)
+			// TODO: how do we signal an error?
+			continue
+		}
+
+		recordData := r.Bytes()
+		_, err = newDataFile.f.Write(recordData)
+		if err != nil {
+			//log.Printf("Write failed: %v", err)
+			// TODO: how do we signal an error?
+			continue
+		}
+
+		keyDirRecord.valuePos = valuePos
+		keyDirRecord.fileID = 0
+
+		valuePos += int64(len(recordData))
+
+		hr := hintRecord{ts: keyDirRecord.ts, valueLen: keyDirRecord.valueSize, valuePos: keyDirRecord.valuePos, key: []byte(key)}
+		if _, err := hr.WriteTo(newHintFile); err != nil {
+			//log.Printf("hr.WriteTo failed: %v", err)
+			// TODO: how do we signal an error?
+			continue
+		}
+	}
+	newHintFile.Close()
+
+	b.mtx.Lock()
+
+	mergedDataFileCount := len(dataFilesToMerge)
+
+	// correct b.dataFiles:
+	b.dataFiles = append([]*dataFile{newDataFile}, b.dataFiles[mergedDataFileCount:]...)
+
+	// correct valuePos, valueSize, and fileIDs in b.keyDir:
+	for key, kr := range b.keyDir {
+		if kr.fileID < mergedDataFileCount {
+			if mergedRecord, ok := mergedHintFile[key]; ok {
+				if mergedRecord.valueSize == tombStone {
+					delete(b.keyDir, key) // TODO: is this legal?
+				} else {
+					//log.Printf("Merge %q: fileID:%d valuePos:%d valueSize:%d", key, kr.fileID, kr.valuePos, kr.valueSize)
+					kr.fileID = mergedRecord.fileID
+					kr.valuePos = mergedRecord.valuePos
+					kr.valueSize = mergedRecord.valueSize
+					kr.ts = mergedRecord.ts
+				}
+			} else {
+				//log.Printf("couldn't find record for %s in existing keyDir", key)
+				delete(b.keyDir, key) // TODO: is this legal?
+			}
+		} else {
+			kr.fileID -= mergedDataFileCount - 1
+		}
+	}
+
+	// remove merged data and hint files.
+	for _, df := range dataFilesToMerge {
+		dataFileName := filepath.Join(b.directory, df.name+dataFileSuffix)
+		hintFileName := filepath.Join(b.directory, df.name+hintFileSuffix)
+		os.Remove(dataFileName)
+		os.Remove(hintFileName)
+	}
+
+	b.mtx.Unlock()
+
+	return nil
 }
 
+// Sync calls fsync(2) on all open data files.
 func (b *BitButt) Sync() error {
 	if b.closed {
 		return errClosed
@@ -404,6 +634,8 @@ func (b *BitButt) Sync() error {
 	return f.Sync()
 }
 
+// Close creates missing hint files, closes all open data files, and
+// invalidates the BitButt object.
 func (b *BitButt) Close() {
 	if b.closed {
 		return
