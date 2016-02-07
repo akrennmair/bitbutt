@@ -271,3 +271,26 @@ func BenchmarkRandomRead1KBRecord(b *testing.B) {
 	os.RemoveAll("./bench_read2.db")
 	b.StartTimer()
 }
+
+func TestExclusiveLocking(t *testing.T) {
+	os.RemoveAll("./lock_test.db")
+	bb1, err := Open("./lock_test.db")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	bb2, err := Open("./lock_test.db")
+	if err == nil || bb2 != nil {
+		t.Fatalf("Expected second Open to fail, got err == nil instead.")
+	}
+
+	bb1.Close()
+
+	bb3, err := Open("./lock_test.db")
+	if err != nil {
+		t.Fatalf("Third Open failed: %v", err)
+	}
+
+	bb3.Close()
+	os.RemoveAll("./lock_test.db")
+}

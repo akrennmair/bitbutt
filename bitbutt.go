@@ -1,3 +1,5 @@
+// Package bitbutt implements a key-value store based on Basho's bitcask
+// log-structured hash-table.
 package bitbutt
 
 import (
@@ -10,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nightlyone/lockfile"
 )
 
 // BitButt implements a key-value store based on Basho's bitcask log-structured
@@ -29,6 +33,8 @@ type BitButt struct {
 	mtx sync.RWMutex
 
 	closed bool
+
+	lockFile lockfile.Lockfile
 }
 
 type dataFile struct {
@@ -63,6 +69,7 @@ const (
 
 	dataFileSuffix = ".bitbutt.data"
 	hintFileSuffix = ".bitbutt.hint"
+	lockFileName   = "bitbutt.write.lock"
 )
 
 var (
@@ -73,6 +80,7 @@ var (
 	errNotFound        = errors.New("not found")
 	errClosed          = errors.New("bitbutt is closed")
 	errInvalidDataFile = errors.New("invalid data file name")
+	errLocked          = errors.New("bitbutt is locked")
 )
 
 // Open opens a bitbutt key-value store, found in directory. If directory
@@ -102,13 +110,28 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 		}
 	}
 
+	lockFn, err := filepath.Abs(filepath.Join(b.directory, lockFileName))
+	if err != nil {
+		return nil, err
+	}
+	lockFile, err := lockfile.New(lockFn)
+	if err != nil {
+		return nil, err
+	}
+	b.lockFile = lockFile
+	if err := b.lockFile.TryLock(); err != nil {
+		return nil, err
+	}
+
 	fDir, err := os.Open(b.directory)
 	if err != nil {
+		lockFile.Unlock()
 		return nil, err
 	}
 
 	files, err := fDir.Readdirnames(-1)
 	if err != nil {
+		lockFile.Unlock()
 		return nil, err
 	}
 
@@ -121,12 +144,14 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 
 	for _, f := range dataFiles {
 		if err := b.loadDataFile(f); err != nil {
+			lockFile.Unlock()
 			return nil, err
 		}
 	}
 
 	df, err := b.newDataFile()
 	if err != nil {
+		lockFile.Unlock()
 		return nil, err
 	}
 
@@ -653,6 +678,9 @@ func (b *BitButt) Close() {
 	}
 
 	b.mtx.Lock()
+
+	b.lockFile.Unlock()
+
 	b.buildHintFile(b.dataFiles[len(b.dataFiles)-1], len(b.dataFiles)-1)
 	for _, df := range b.dataFiles {
 		df.f.Close()
