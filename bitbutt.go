@@ -11,9 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-
-	"github.com/nightlyone/lockfile"
 )
 
 // BitButt implements a key-value store based on Basho's bitcask log-structured
@@ -34,7 +33,7 @@ type BitButt struct {
 
 	closed bool
 
-	lockFile lockfile.Lockfile
+	lockFd int
 }
 
 type dataFile struct {
@@ -110,28 +109,19 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 		}
 	}
 
-	lockFn, err := filepath.Abs(filepath.Join(b.directory, lockFileName))
-	if err != nil {
-		return nil, err
-	}
-	lockFile, err := lockfile.New(lockFn)
-	if err != nil {
-		return nil, err
-	}
-	b.lockFile = lockFile
-	if err := b.lockFile.TryLock(); err != nil {
+	if err := b.tryLock(); err != nil {
 		return nil, err
 	}
 
 	fDir, err := os.Open(b.directory)
 	if err != nil {
-		lockFile.Unlock()
+		b.unlock()
 		return nil, err
 	}
 
 	files, err := fDir.Readdirnames(-1)
 	if err != nil {
-		lockFile.Unlock()
+		b.unlock()
 		return nil, err
 	}
 
@@ -144,14 +134,14 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 
 	for _, f := range dataFiles {
 		if err := b.loadDataFile(f); err != nil {
-			lockFile.Unlock()
+			b.unlock()
 			return nil, err
 		}
 	}
 
 	df, err := b.newDataFile()
 	if err != nil {
-		lockFile.Unlock()
+		b.unlock()
 		return nil, err
 	}
 
@@ -679,7 +669,7 @@ func (b *BitButt) Close() {
 
 	b.mtx.Lock()
 
-	b.lockFile.Unlock()
+	b.unlock()
 
 	b.buildHintFile(b.dataFiles[len(b.dataFiles)-1], len(b.dataFiles)-1)
 	for _, df := range b.dataFiles {
@@ -689,4 +679,26 @@ func (b *BitButt) Close() {
 	b.keyDir = nil
 	b.closed = true
 	b.mtx.Unlock()
+}
+
+func (b *BitButt) tryLock() error {
+	fn := filepath.Join(b.directory, lockFileName)
+	fd, err := syscall.Open(fn, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		syscall.Close(fd)
+		return err
+	}
+
+	b.lockFd = fd
+
+	return nil
+}
+
+func (b *BitButt) unlock() {
+	syscall.Flock(b.lockFd, syscall.LOCK_UN)
+	syscall.Close(b.lockFd)
 }
