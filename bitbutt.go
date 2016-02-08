@@ -577,13 +577,13 @@ func (b *BitButt) Merge() error {
 		data := make([]byte, keyDirRecord.recordSize)
 		if _, err := f.ReadAt(data, keyDirRecord.recordPos); err != nil {
 			rollbackOnError()
-			return fmt.Errorf("ReadAt failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos)
+			return fmt.Errorf("ReadAt failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos, err)
 		}
 
 		r, err := readRecord(bytes.NewReader(data))
 		if err != nil {
 			rollbackOnError()
-			return fmt.Errorf("Decoding record failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos)
+			return fmt.Errorf("Decoding record failed for key %q from file %s on position %d: %v", string(key), df.name, keyDirRecord.recordPos, err)
 		}
 
 		recordData := r.Bytes()
