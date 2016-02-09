@@ -49,6 +49,13 @@ type keyRecord struct {
 	ts         time.Time
 }
 
+type metaData struct {
+	key     []byte
+	deleted bool
+	ts      time.Time
+	length  uint64
+}
+
 // Option is a data type to set options when calling Open.
 type Option func(*BitButt)
 
@@ -80,6 +87,7 @@ var (
 	errClosed          = errors.New("bitbutt is closed")
 	errInvalidDataFile = errors.New("invalid data file name")
 	errLocked          = errors.New("bitbutt is locked")
+	errConflict        = errors.New("update conflict")
 )
 
 // Open opens a bitbutt key-value store, found in directory. If directory
@@ -271,6 +279,86 @@ func (b *BitButt) Get(key []byte) ([]byte, error) {
 	}
 
 	return r.value, nil
+}
+
+func (b *BitButt) bulkWrite(buf []byte, md []metaData) error {
+	if b.readOnly {
+		return errReadOnly
+	}
+
+	b.mtx.Lock()
+
+	// check for any update conflicts
+	for _, m := range md {
+		if r, ok := b.keyDir[string(m.key)]; ok {
+			if r.ts.After(m.ts) {
+				b.mtx.Unlock()
+				return errConflict
+			}
+		}
+	}
+
+	// write bulk data
+	fileID := len(b.dataFiles) - 1
+	df := b.dataFiles[fileID]
+
+	if _, err := df.f.Write(buf); err != nil {
+		b.mtx.Unlock()
+		return err
+	}
+
+	// update keyDir
+	for _, m := range md {
+		keyDirRecord, ok := b.keyDir[string(m.key)]
+		if !ok {
+			if m.deleted {
+				continue
+			}
+			keyDirRecord = &keyRecord{fileID: fileID, recordPos: int64(df.offset), recordSize: m.length, ts: m.ts}
+			b.keyDir[string(m.key)] = keyDirRecord
+		} else {
+			keyDirRecord.fileID = fileID
+			keyDirRecord.recordPos = int64(df.offset)
+			if m.deleted {
+				keyDirRecord.recordSize = tombStone
+			} else {
+				keyDirRecord.recordSize = m.length
+			}
+		}
+
+		df.offset += m.length
+	}
+
+	var buildHintFile bool
+
+	// check whether rollover is necessary
+	if df.offset >= b.sizeThreshold {
+		buildHintFile = true
+
+		newDataFile, err := b.newDataFile()
+		if err != nil {
+			panic(err) // TODO: how do we handle a rollover fail?
+		}
+		b.dataFiles = append(b.dataFiles, newDataFile)
+	}
+
+	b.mtx.Unlock()
+
+	if b.syncOnPut {
+		if err := df.f.Sync(); err != nil {
+			return err
+		}
+	}
+
+	if buildHintFile {
+		go func() {
+			b.mtx.RLock()
+			b.buildHintFile(df, fileID)
+			b.mtx.RUnlock()
+		}()
+	}
+
+	return nil
 }
 
 // Put stores the specified key-value pair in the bitbutt data store. It
