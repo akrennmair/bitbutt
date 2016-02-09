@@ -64,6 +64,7 @@ type metaData struct {
 // Option is a data type to set options when calling Open.
 type Option func(*BitButt)
 
+// MergeWindow specifies the time window when automatic merges will be conducted.
 type MergeWindow struct {
 	StartHour int
 	EndHour   int
@@ -101,8 +102,11 @@ var (
 	errLocked          = errors.New("bitbutt is locked")
 	errConflict        = errors.New("update conflict")
 
-	Never  *MergeWindow = nil
-	Always *MergeWindow = &MergeWindow{0, 23}
+	// Never is the default MergeWindow: never merge automatically
+	Never *MergeWindow
+
+	// Always is the merge window to always merge automatically
+	Always = &MergeWindow{0, 23}
 )
 
 // Open opens a bitbutt key-value store, found in directory. If directory
