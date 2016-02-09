@@ -21,8 +21,13 @@ type BitButt struct {
 	readOnly      bool
 	sizeThreshold uint64
 	syncOnPut     bool
-	dirPerm       os.FileMode
-	filePerm      os.FileMode
+	syncInterval  time.Duration
+	quitSyncChan  chan struct{}
+	mergeWindow   *MergeWindow
+	quitMergeChan chan struct{}
+
+	dirPerm  os.FileMode
+	filePerm os.FileMode
 
 	keyDir map[string]*keyRecord
 
@@ -59,6 +64,11 @@ type metaData struct {
 // Option is a data type to set options when calling Open.
 type Option func(*BitButt)
 
+type MergeWindow struct {
+	StartHour int
+	EndHour   int
+}
+
 const (
 	// KiB is to be used with ThresholdSize to specify kibibytes (1024 bytes).
 	KiB uint64 = 1024
@@ -76,6 +86,8 @@ const (
 	dataFileSuffix = ".bitbutt.data"
 	hintFileSuffix = ".bitbutt.hint"
 	lockFileName   = "bitbutt.write.lock"
+
+	defaultAutoMergeInterval = 5 * time.Minute
 )
 
 var (
@@ -88,6 +100,9 @@ var (
 	errInvalidDataFile = errors.New("invalid data file name")
 	errLocked          = errors.New("bitbutt is locked")
 	errConflict        = errors.New("update conflict")
+
+	Never  *MergeWindow = nil
+	Always *MergeWindow = &MergeWindow{0, 23}
 )
 
 // Open opens a bitbutt key-value store, found in directory. If directory
@@ -155,7 +170,32 @@ func Open(directory string, opts ...Option) (*BitButt, error) {
 
 	b.dataFiles = append(b.dataFiles, df)
 
+	if b.syncInterval != 0 {
+		go b.sync()
+	}
+
+	if b.mergeWindow != nil {
+		go b.autoMerge()
+	}
+
 	return b, nil
+}
+
+func (b *BitButt) sync() {
+	b.quitSyncChan = make(chan struct{})
+
+	ticker := time.NewTicker(b.syncInterval)
+
+	for {
+		select {
+		case <-b.quitSyncChan:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			b.Sync()
+		}
+
+	}
 }
 
 func (b *BitButt) loadDataFile(file string) error {
@@ -225,6 +265,40 @@ func ReadOnly() Option {
 func SyncOnPut() Option {
 	return func(b *BitButt) {
 		b.syncOnPut = true
+	}
+}
+
+// SyncInterval makes a bitbutt store repeatedy call fsync(2) at a specified interval.
+func SyncInterval(interval time.Duration) Option {
+	return func(b *BitButt) {
+		b.syncInterval = interval
+	}
+}
+
+// AllowedMergeWindow sets a merge window. If a merge window other than Never is set,
+// merges will be conducted regularly and automatically within that timeframe.
+func AllowedMergeWindow(window *MergeWindow) Option {
+	return func(b *BitButt) {
+		b.mergeWindow = window
+	}
+}
+
+func (b *BitButt) autoMerge() {
+	b.quitMergeChan = make(chan struct{})
+
+	ticker := time.NewTicker(defaultAutoMergeInterval)
+
+	for {
+		select {
+		case <-b.quitMergeChan:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			hour := time.Now().Hour()
+			if b.mergeWindow != nil && hour >= b.mergeWindow.StartHour && hour <= b.mergeWindow.EndHour {
+				b.Merge()
+			}
+		}
 	}
 }
 
@@ -756,6 +830,14 @@ func (b *BitButt) Close() {
 	}
 
 	b.mtx.Lock()
+
+	if b.quitSyncChan != nil {
+		close(b.quitSyncChan)
+	}
+
+	if b.quitMergeChan != nil {
+		close(b.quitMergeChan)
+	}
 
 	b.unlock()
 
