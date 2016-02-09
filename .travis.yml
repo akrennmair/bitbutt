@@ -3,6 +3,3 @@ language: go
 go:
   - 1.5
   - tip
-
-script:
-  - GO15VENDOREXPERIMENT=1 go test -v ./...
