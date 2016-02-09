@@ -17,8 +17,6 @@ Installation is as simple as
 
 	go get github.com/akrennmair/bitbutt
 
-With Go 1.5, this package requires the environment variable `GO15VENDOREXPERIMENT=1` to be set.
-
 ## Documentation
 
 As with all Go packages, you can find the documentation on 
